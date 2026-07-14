@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kuasbet — LSports A-Z Latency Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background:#0a0a0a; color:#f0ece4; margin:0; padding:24px; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  .sub { color:#8a8078; font-size:13px; margin-bottom:24px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; margin-bottom:24px; }
+  .card { background:#141414; border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:16px; }
+  .card .label { font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:#8a8078; margin-bottom:6px; }
+  .card .value { font-size:28px; font-weight:700; }
+  .ok { color:#4caf50; } .warn { color:#f5c518; } .bad { color:#e8302a; }
+  .chart-wrap { background:#141414; border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .status-badge { display:inline-block; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:700; text-transform:uppercase; }
+  .thresholds { font-size:11px; color:#4a4038; margin-top:6px; }
+  .feed-note { background:rgba(245,197,24,0.08); border:1px solid rgba(245,197,24,0.25); border-radius:8px; padding:12px 16px; margin-bottom:20px; font-size:13px; color:#f5c518; }
+</style>
+</head>
+<body>
+  <h1>Kuasbet — LSports A-Z Latency Dashboard</h1>
+  <div class="sub">Live consumption metrics for our Trade360 RabbitMQ consumer · auto-refreshes every 10s</div>
+
+  <div class="feed-note">
+    ⚠️ Package scope: <strong>Prematch only</strong>. InPlay is not currently subscribed on our package, so no InPlay data is shown below.
+  </div>
+
+  <div class="grid" id="statCards"></div>
+
+  <div class="chart-wrap">
+    <div class="label" style="font-size:12px;color:#8a8078;margin-bottom:8px;">PREMATCH — Consumption → Processing → End-to-End Latency (ms)</div>
+    <canvas id="latencyChart" height="90"></canvas>
+    <div class="thresholds">Thresholds — Processing: &lt;50ms · Prematch total: &lt;3000ms</div>
+  </div>
+
+  <div class="chart-wrap">
+    <div class="label" style="font-size:12px;color:#8a8078;margin-bottom:8px;">Heartbeat Freshness & Recovery Events</div>
+    <canvas id="heartbeatChart" height="60"></canvas>
+  </div>
+
+<script>
+const HEALTH_URL = "https://kuasbet-odds-consumer-v2.onrender.com/health";
+const MAX_POINTS = 60;
+const history = { labels: [], consumption: [], processing: [], e2e: [], heartbeatFreshness: [] };
+
+const latencyCtx = document.getElementById('latencyChart').getContext('2d');
+const latencyChart = new Chart(latencyCtx, {
+  type: 'line',
+  data: { labels: history.labels, datasets: [
+    { label: 'Consumption (ms)', data: history.consumption, borderColor: '#e8302a', backgroundColor: 'rgba(232,48,42,0.1)', tension: 0.3 },
+    { label: 'Processing (ms)', data: history.processing, borderColor: '#4caf50', backgroundColor: 'rgba(76,175,80,0.1)', tension: 0.3 },
+    { label: 'End-to-End (ms)', data: history.e2e, borderColor: '#f5c518', backgroundColor: 'rgba(245,197,24,0.1)', tension: 0.3 },
+  ]},
+  options: { responsive:true, scales:{ x:{ ticks:{color:'#8a8078'}, grid:{color:'rgba(255,255,255,0.05)'} }, y:{ ticks:{color:'#8a8078'}, grid:{color:'rgba(255,255,255,0.05)'} } }, plugins:{ legend:{ labels:{color:'#f0ece4'} } } }
+});
+
+const hbCtx = document.getElementById('heartbeatChart').getContext('2d');
+const hbChart = new Chart(hbCtx, {
+  type: 'line',
+  data: { labels: history.labels, datasets: [
+    { label: 'Heartbeat freshness (ms since last)', data: history.heartbeatFreshness, borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.1)', tension: 0.3 },
+  ]},
+  options: { responsive:true, scales:{ x:{ ticks:{color:'#8a8078'}, grid:{color:'rgba(255,255,255,0.05)'} }, y:{ ticks:{color:'#8a8078'}, grid:{color:'rgba(255,255,255,0.05)'} } }, plugins:{ legend:{ labels:{color:'#f0ece4'} } } }
+});
+
+function statCard(label, value, unit, thresholdCheck) {
+  const cls = thresholdCheck === null ? '' : (thresholdCheck ? 'ok' : 'bad');
+  return `<div class="card"><div class="label">${label}</div><div class="value ${cls}">${value}<span style="font-size:14px;color:#8a8078;"> ${unit}</span></div></div>`;
+}
+
+async function poll() {
+  try {
+    const res = await fetch(HEALTH_URL);
+    const data = await res.json();
+    const now = new Date().toLocaleTimeString();
+
+    history.labels.push(now);
+    history.consumption.push(data.latency?.consumptionMsAvg ?? 0);
+    history.processing.push(data.latency?.processingMsAvg ?? 0);
+    history.e2e.push(data.latency?.endToEndMsAvg ?? 0);
+    history.heartbeatFreshness.push(data.heartbeatFreshnessMs ?? 0);
+
+    if (history.labels.length > MAX_POINTS) {
+      history.labels.shift(); history.consumption.shift(); history.processing.shift();
+      history.e2e.shift(); history.heartbeatFreshness.shift();
+    }
+
+    latencyChart.update();
+    hbChart.update();
+
+    document.getElementById('statCards').innerHTML = [
+      statCard('Status', data.status ?? '—', '', data.status === 'ok'),
+      statCard('Consumption Latency', data.latency?.consumptionMsAvg ?? '—', 'ms', (data.latency?.consumptionMsAvg ?? 99999) < 3000),
+      statCard('Processing Latency', data.latency?.processingMsAvg ?? '—', 'ms', (data.latency?.processingMsAvg ?? 99999) < 50),
+      statCard('End-to-End Latency', data.latency?.endToEndMsAvg ?? '—', 'ms', (data.latency?.endToEndMsAvg ?? 99999) < 3000),
+      statCard('Heartbeat Freshness', data.heartbeatFreshnessMs ?? '—', 'ms', (data.heartbeatFreshnessMs ?? 99999) < 12000),
+      statCard('Known Fixtures', data.knownFixtures ?? '—', '', null),
+      statCard('Recoveries (last hr)', data.recoveriesLastHour ?? '—', '', null),
+      statCard('Queue Depth (market)', data.queueDepths?.market ?? '—', 'msgs', (data.queueDepths?.market ?? 99999) < 500),
+    ].join('');
+  } catch (err) {
+    document.getElementById('statCards').innerHTML = `<div class="card"><div class="label">Error</div><div class="value bad">Failed to fetch /health</div></div>`;
+  }
+}
+
+poll();
+setInterval(poll, 10000);
+</script>
+</body>
+</html>
